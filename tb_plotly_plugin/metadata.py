@@ -1,0 +1,14 @@
+from tensorboard.compat.proto import summary_pb2
+
+PLUGIN_NAME = "plotly"
+
+
+def create_summary_metadata(display_name=None, description=None):
+    return summary_pb2.SummaryMetadata(
+        display_name=display_name or "",
+        summary_description=description or "",
+        plugin_data=summary_pb2.SummaryMetadata.PluginData(
+            plugin_name=PLUGIN_NAME,
+            content=b"",
+        ),
+    )
