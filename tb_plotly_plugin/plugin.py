@@ -15,22 +15,66 @@ function localUrl(path) {
   return new URL(path, import.meta.url).href;
 }
 
+function showFatalError(err) {
+  try {
+    const pre = document.createElement("pre");
+    pre.style.color = "#b00020";
+    pre.style.whiteSpace = "pre-wrap";
+    pre.style.padding = "24px";
+    pre.style.margin = "0";
+    pre.textContent =
+      "tb-plotly-plugin error:\n" +
+      String((err && (err.stack || err.message)) || err);
+    (document.body || document.documentElement).appendChild(pre);
+  } catch (ignored) {
+    // Nothing else we can do.
+  }
+}
+
+// TensorBoard's plugin_entry.html invokes this module via
+// `import("./index.js").then((m) => void m.render())` with no .catch().
+// Any uncaught error or unhandled rejection would therefore result in a
+// completely blank iframe. Surface such failures on the page instead.
+window.addEventListener("error", (event) => {
+  showFatalError(event.error || event.message);
+});
+window.addEventListener("unhandledrejection", (event) => {
+  showFatalError(event.reason);
+});
+
+let plotlyPromise = null;
+
 function loadPlotly() {
   if (window.Plotly) {
     return Promise.resolve(window.Plotly);
   }
 
-  return new Promise((resolve, reject) => {
-    const script = document.createElement("script");
+  if (!plotlyPromise) {
+    plotlyPromise = new Promise((resolve, reject) => {
+      const script = document.createElement("script");
 
-    // IMPORTANT:
-    // This is served by the TensorBoard plugin backend, not by cdn.plot.ly.
-    script.src = localUrl("./plotly.min.js");
+      // IMPORTANT:
+      // This is served by the TensorBoard plugin backend, not by cdn.plot.ly.
+      script.src = localUrl("./plotly.min.js");
 
-    script.onload = () => resolve(window.Plotly);
-    script.onerror = reject;
-    document.head.appendChild(script);
-  });
+      script.onload = () => {
+        if (window.Plotly) {
+          resolve(window.Plotly);
+        } else {
+          reject(
+            new Error("plotly.min.js loaded, but window.Plotly is not set")
+          );
+        }
+      };
+      script.onerror = () => {
+        plotlyPromise = null;
+        reject(new Error("Failed to load " + script.src));
+      };
+      document.head.appendChild(script);
+    });
+  }
+
+  return plotlyPromise;
 }
 
 function el(tag, attrs = {}, children = []) {
@@ -73,88 +117,90 @@ async function fetchJson(path, params = {}) {
   return await response.json();
 }
 
-// TensorBoard calls render() with no arguments, so `context` may be
-// undefined. Fall back to document.body in that case.
-export async function render(context) {
+const STYLE_TEXT = `
+  body {
+    font-family: Roboto, Arial, sans-serif;
+    margin: 0;
+    color: #333;
+    background: #fafafa;
+  }
+
+  .tbp-page {
+    padding: 24px;
+  }
+
+  .tbp-toolbar {
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+  }
+
+  .tbp-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 12px;
+    color: #666;
+  }
+
+  .tbp-field select {
+    min-width: 180px;
+    padding: 6px;
+    font-size: 14px;
+  }
+
+  .tbp-card {
+    background: white;
+    border-radius: 4px;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.20);
+    padding: 16px;
+    max-width: 900px;
+  }
+
+  .tbp-title {
+    font-size: 15px;
+    font-weight: 500;
+    margin-bottom: 12px;
+  }
+
+  .tbp-status {
+    color: #666;
+    margin-bottom: 8px;
+  }
+
+  .tbp-plot {
+    width: 100%;
+    height: 650px;
+  }
+
+  .tbp-error {
+    color: #b00020;
+    white-space: pre-wrap;
+  }
+`;
+
+let hasRendered = false;
+
+export function render(context) {
+  if (hasRendered) {
+    return;
+  }
+  hasRendered = true;
+
   const root = (context && context.container) || document.body;
 
   try {
-    await renderApp(root);
+    renderApp(root);
   } catch (err) {
-    root.innerHTML = "";
-    const pre = document.createElement("pre");
-    pre.style.color = "#b00020";
-    pre.style.whiteSpace = "pre-wrap";
-    pre.style.padding = "24px";
-    pre.textContent = String((err && (err.stack || err.message)) || err);
-    root.appendChild(pre);
+    showFatalError(err);
   }
 }
 
-async function renderApp(root) {
-  const Plotly = await loadPlotly();
-
-  root.innerHTML = "";
-
-  const style = el("style", {}, [`
-    body {
-      font-family: Roboto, Arial, sans-serif;
-      margin: 0;
-      color: #333;
-      background: #fafafa;
-    }
-
-    .tbp-page {
-      padding: 24px;
-    }
-
-    .tbp-toolbar {
-      display: flex;
-      gap: 16px;
-      align-items: center;
-      margin-bottom: 16px;
-      flex-wrap: wrap;
-    }
-
-    .tbp-field {
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-      font-size: 12px;
-      color: #666;
-    }
-
-    .tbp-field select {
-      min-width: 180px;
-      padding: 6px;
-      font-size: 14px;
-    }
-
-    .tbp-card {
-      background: white;
-      border-radius: 4px;
-      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.20);
-      padding: 16px;
-      max-width: 900px;
-    }
-
-    .tbp-title {
-      font-size: 15px;
-      font-weight: 500;
-      margin-bottom: 12px;
-    }
-
-    .tbp-plot {
-      width: 100%;
-      height: 650px;
-    }
-
-    .tbp-error {
-      color: #b00020;
-      white-space: pre-wrap;
-    }
-  `]);
-
+function renderApp(root) {
+  const style = document.createElement("style");
+  style.textContent = STYLE_TEXT;
   document.head.appendChild(style);
 
   const runSelect = el("select");
@@ -162,8 +208,9 @@ async function renderApp(root) {
   const stepSelect = el("select");
 
   const title = el("div", { className: "tbp-title" }, ["Plotly"]);
-  const plotDiv = el("div", { className: "tbp-plot" });
+  const statusDiv = el("div", { className: "tbp-status" });
   const errorDiv = el("div", { className: "tbp-error" });
+  const plotDiv = el("div", { className: "tbp-plot" });
 
   const page = el("div", { className: "tbp-page" }, [
     el("div", { className: "tbp-toolbar" }, [
@@ -173,18 +220,28 @@ async function renderApp(root) {
     ]),
     el("div", { className: "tbp-card" }, [
       title,
+      statusDiv,
       errorDiv,
       plotDiv,
     ]),
   ]);
 
+  // The UI shell is attached to the DOM *before* any network activity so
+  // the page is never blank, even if loading Plotly or data fails.
+  root.innerHTML = "";
   root.appendChild(page);
 
   let tagsByRun = {};
   let currentEvents = [];
 
+  function setStatus(message) {
+    statusDiv.textContent = message || "";
+  }
+
   function setError(err) {
-    errorDiv.textContent = err ? String(err.stack || err.message || err) : "";
+    errorDiv.textContent = err
+      ? String((err && (err.stack || err.message)) || err)
+      : "";
   }
 
   function fillSelect(select, values) {
@@ -197,16 +254,18 @@ async function renderApp(root) {
   }
 
   async function loadTags() {
+    setStatus("Loading tags\u2026");
     tagsByRun = await fetchJson("./tags");
 
     const runs = Object.keys(tagsByRun).sort();
     fillSelect(runSelect, runs);
 
     if (runs.length === 0) {
-      title.textContent = "No Plotly summaries found";
+      setStatus("No Plotly summaries found in the current logdir.");
       return;
     }
 
+    setStatus("");
     await loadTagsForRun();
   }
 
@@ -233,9 +292,11 @@ async function renderApp(root) {
       return;
     }
 
+    setStatus("Loading figures\u2026");
     currentEvents = await fetchJson("./plots", { run, tag });
+    setStatus("");
 
-    const steps = currentEvents.map((event) => `${event.step}`);
+    const steps = currentEvents.map((event) => String(event.step));
     fillSelect(stepSelect, steps);
 
     if (currentEvents.length > 0) {
@@ -256,36 +317,52 @@ async function renderApp(root) {
       return;
     }
 
+    setStatus("Loading Plotly library\u2026");
+    const Plotly = await loadPlotly();
+    setStatus("");
+
     const fig = event.figure || {};
     const data = fig.data || [];
     const layout = fig.layout || {};
     const config = Object.assign({ responsive: true }, fig.config || {});
 
-    title.textContent = `${tagSelect.value} — step ${event.step}`;
+    title.textContent = tagSelect.value + " \u2014 step " + event.step;
 
     layout.autosize = true;
 
     await Plotly.react(plotDiv, data, layout, config);
   }
 
+  function reportError(err) {
+    setStatus("");
+    setError(err);
+  }
+
   runSelect.addEventListener("change", () => {
-    loadTagsForRun().catch(setError);
+    loadTagsForRun().catch(reportError);
   });
 
   tagSelect.addEventListener("change", () => {
-    loadEvents().catch(setError);
+    loadEvents().catch(reportError);
   });
 
   stepSelect.addEventListener("change", () => {
-    drawCurrentStep().catch(setError);
+    drawCurrentStep().catch(reportError);
   });
 
-  try {
-    await loadTags();
-  } catch (err) {
-    setError(err);
-  }
+  loadTags().catch(reportError);
+
+  // Warm up the Plotly library in the background; failures will surface via
+  // drawCurrentStep()/reportError when a figure is actually drawn.
+  loadPlotly().catch(() => {});
 }
+
+// TensorBoard normally calls the exported render() itself. As a defensive
+// fallback, render once on our own shortly after the module loads if the
+// host has not done so (render() is idempotent via the hasRendered flag).
+setTimeout(() => {
+  render();
+}, 0);
 """
 
 
