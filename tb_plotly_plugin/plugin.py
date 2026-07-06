@@ -73,10 +73,27 @@ async function fetchJson(path, params = {}) {
   return await response.json();
 }
 
+// TensorBoard calls render() with no arguments, so `context` may be
+// undefined. Fall back to document.body in that case.
 export async function render(context) {
+  const root = (context && context.container) || document.body;
+
+  try {
+    await renderApp(root);
+  } catch (err) {
+    root.innerHTML = "";
+    const pre = document.createElement("pre");
+    pre.style.color = "#b00020";
+    pre.style.whiteSpace = "pre-wrap";
+    pre.style.padding = "24px";
+    pre.textContent = String((err && (err.stack || err.message)) || err);
+    root.appendChild(pre);
+  }
+}
+
+async function renderApp(root) {
   const Plotly = await loadPlotly();
 
-  const root = context.container || document.body;
   root.innerHTML = "";
 
   const style = el("style", {}, [`
