@@ -10,6 +10,8 @@ from werkzeug import wrappers
 
 from . import metadata
 
+_MAX_EVENTS = 1000
+
 _INDEX_JS = r"""
 function localUrl(path) {
   return new URL(path, import.meta.url).href;
@@ -371,6 +373,7 @@ class PlotlyPlugin(base_plugin.TBPlugin):
 
     def __init__(self, context):
         self.data_provider = context.data_provider
+        self._multiplexer = getattr(context, "multiplexer", None)
         self._plotly_js = None
 
     def is_active(self):
@@ -423,11 +426,8 @@ class PlotlyPlugin(base_plugin.TBPlugin):
         )
 
         result = {}
-
-        for run, tag_to_content in mapping.items():
-            result[run] = {}
-            for tag in tag_to_content.keys():
-                result[run][tag] = {}
+        _merge_tag_mapping(result, mapping)
+        _merge_tag_mapping(result, self._legacy_plugin_tag_mapping())
 
         return http_util.Respond(
             request,
@@ -446,23 +446,35 @@ class PlotlyPlugin(base_plugin.TBPlugin):
         ctx = plugin_util.context(request.environ)
         experiment = plugin_util.experiment_id(request.environ)
 
-        read_result = self.data_provider.read_tensors(
-            ctx,
-            experiment_id=experiment,
-            plugin_name=metadata.PLUGIN_NAME,
-            downsample=1000,
-            run_tag_filter=provider.RunTagFilter(
-                runs=[run],
-                tags=[tag],
-            ),
-        )
+        events = []
+        read_error = None
 
-        events = read_result.get(run, {}).get(tag, [])
+        try:
+            read_result = self.data_provider.read_tensors(
+                ctx,
+                experiment_id=experiment,
+                plugin_name=metadata.PLUGIN_NAME,
+                downsample=_MAX_EVENTS,
+                run_tag_filter=provider.RunTagFilter(
+                    runs=[run],
+                    tags=[tag],
+                ),
+            )
+            events = read_result.get(run, {}).get(tag, [])
+        except Exception as exc:
+            read_error = exc
 
+        if not events:
+            events = self._legacy_tensor_events(run, tag)
+
+            if read_error is not None and not events:
+                raise read_error
+
+        events = _downsample_events(events, _MAX_EVENTS)
         result = []
 
         for event in events:
-            payload = _decode_string_tensor(event.numpy)
+            payload = _decode_string_tensor(_event_tensor_value(event))
 
             result.append(
                 {
@@ -478,16 +490,112 @@ class PlotlyPlugin(base_plugin.TBPlugin):
             "application/json",
         )
 
+    def _legacy_plugin_tag_mapping(self):
+        """
+        Return plugin-tag mappings from TensorBoard's legacy event multiplexer.
+
+        Older versions of this package wrote SummaryMetadata.plugin_data but did
+        not set SummaryMetadata.data_class. TensorBoard's modern data_provider
+        can ignore those summaries when list_tensors() is filtered by plugin,
+        but the legacy event multiplexer still exposes the plugin metadata.
+        """
+        if self._multiplexer is None:
+            return {}
+
+        plugin_mapping = getattr(
+            self._multiplexer,
+            "PluginRunToTagToContent",
+            None,
+        )
+
+        if plugin_mapping is None:
+            return {}
+
+        try:
+            return plugin_mapping(metadata.PLUGIN_NAME)
+        except (KeyError, ValueError):
+            return {}
+
+    def _legacy_tensor_events(self, run, tag):
+        if self._multiplexer is None:
+            return []
+
+        tensors = getattr(self._multiplexer, "Tensors", None)
+
+        if tensors is None:
+            return []
+
+        try:
+            return tensors(run, tag)
+        except (KeyError, ValueError):
+            return []
+
+
+def _merge_tag_mapping(result, mapping):
+    if not mapping:
+        return
+
+    for run, tag_to_content in mapping.items():
+        result.setdefault(run, {})
+
+        for tag in tag_to_content.keys():
+            result[run].setdefault(tag, {})
+
+
+def _downsample_events(events, max_events):
+    events = list(events)
+
+    if max_events is None or len(events) <= max_events:
+        return events
+
+    if max_events <= 0:
+        return []
+
+    if max_events == 1:
+        return [events[-1]]
+
+    last_index = len(events) - 1
+    indexes = sorted(
+        set(
+            round(index * last_index / (max_events - 1))
+            for index in range(max_events)
+        )
+    )
+
+    return [events[index] for index in indexes]
+
+
+def _event_tensor_value(event):
+    if hasattr(event, "numpy"):
+        return event.numpy
+
+    if hasattr(event, "tensor_proto"):
+        return event.tensor_proto
+
+    return event
+
 
 def _decode_string_tensor(value):
+    if hasattr(value, "string_val"):
+        if not value.string_val:
+            raise TypeError("String TensorProto has no string_val entries")
+
+        value = value.string_val[0]
+
     if hasattr(value, "item"):
-        value = value.item()
+        try:
+            value = value.item()
+        except ValueError:
+            pass
 
     if isinstance(value, bytes):
         return value.decode("utf-8")
 
     if isinstance(value, str):
         return value
+
+    if isinstance(value, (list, tuple)) and len(value) == 1:
+        return _decode_string_tensor(value[0])
 
     try:
         value = value.reshape(()).item()
