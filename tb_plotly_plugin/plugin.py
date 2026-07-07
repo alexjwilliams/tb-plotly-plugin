@@ -1,6 +1,6 @@
 import json
 
-import plotly.io as pio
+from plotly.offline import get_plotlyjs
 import werkzeug
 from tensorboard import plugin_util
 from tensorboard.backend import http_util
@@ -400,10 +400,10 @@ class PlotlyPlugin(base_plugin.TBPlugin):
 
     @wrappers.Request.application
     def _serve_plotly_js(self, request):
-        # plotly.io.get_plotlyjs() returns the bundled Plotly.js source
-        # from the installed Python plotly package. No CDN is contacted.
+        # get_plotlyjs() returns the bundled Plotly.js source from the
+        # installed Python plotly package. No CDN is contacted.
         if self._plotly_js is None:
-            self._plotly_js = pio.get_plotlyjs()
+            self._plotly_js = get_plotlyjs()
 
         return http_util.Respond(
             request,
